@@ -627,90 +627,98 @@ def main():
             log_step("Ammail tidak dikonfigurasi — skip email verification, lanjut login manual...")
             time.sleep(5)
 
-        # ── Step 7: Login (always after email verification) ──────────────────
-        log_step("Login ke Cloudflare Dashboard...")
-        try:
-            page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
-            time.sleep(2)
-
-            # Wait for login form
-            page.wait_for_selector("input[name='email'], input[autocomplete='email']", timeout=10000)
-
-            # Fill email + password
-            for sel in ["input[name='email']", "input[autocomplete='email']", "input[type='email']"]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=1500):
-                        el.fill(args.email)
-                        break
-                except Exception:
-                    continue
-
-            pw_el = page.locator("input[name='password'], input[type='password']").first
-            if pw_el.is_visible(timeout=3000):
-                pw_el.fill(args.password)
-
-            time.sleep(1)
-
-            # Solve Turnstile on login page
-            login_turnstile_solved = False
+        # ── Step 7: Login if needed ───────────────────────────────────────────
+        # After verify link, CF might already redirect to dashboard
+        _early_account_id = ""
+        _post_verify_url = page.url
+        _m_verify = re.search(r"/([a-f0-9]{32})(?:/|$)", _post_verify_url)
+        if _m_verify:
+            _early_account_id = _m_verify.group(1)
+            log_step(f"Sudah di dashboard setelah verify! Account ID: {_early_account_id[:8]}...")
+        else:
+            log_step("Login ke Cloudflare Dashboard...")
             try:
-                token_val = page.evaluate("() => { const el = document.getElementsByName('cf_challenge_response')[0]; return el ? el.value : ''; }")
-                if token_val and len(token_val.strip()) > 10:
-                    login_turnstile_solved = True
-                    log_step("Turnstile login auto-solved!")
-            except Exception:
-                pass
+                page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
+                time.sleep(2)
 
-            if not login_turnstile_solved and args.captcha_key:
-                log_step("Solve Turnstile login via 2Captcha...")
-                login_token = solve_turnstile_2captcha(
-                    args.captcha_key,
-                    "https://dash.cloudflare.com/login",
-                    CF_SIGNUP_TURNSTILE_SITEKEY,
-                    timeout=120,
-                )
-                if login_token:
-                    inject_turnstile_token(page, login_token)
-                    login_turnstile_solved = True
-                    time.sleep(1)
-                    log_step("Turnstile login injected via 2Captcha!")
+                # Check if already redirected to dashboard
+                _m_redir = re.search(r"/([a-f0-9]{32})(?:/|$)", page.url)
+                if _m_redir:
+                    _early_account_id = _m_redir.group(1)
+                    log_step(f"Redirect otomatis ke dashboard: {_early_account_id[:8]}...")
+                else:
+                    # Wait for login form
+                    try:
+                        page.wait_for_selector("input[name='email'], input[autocomplete='email']", timeout=8000)
+                    except Exception:
+                        log_step("Login form tidak muncul, cek URL...")
+                        _m2 = re.search(r"/([a-f0-9]{32})(?:/|$)", page.url)
+                        if _m2:
+                            _early_account_id = _m2.group(1)
 
-            # Submit login
-            for sel in ["button[type='submit']", "button:has-text('Sign in')", "button:has-text('Log in')"]:
-                try:
-                    btn = page.locator(sel).first
-                    if btn.is_visible(timeout=1000):
-                        btn.click()
-                        break
-                except Exception:
-                    continue
+                    if not _early_account_id:
+                        # Fill email
+                        for sel in ["input[name='email']", "input[autocomplete='email']", "input[type='email']"]:
+                            try:
+                                el = page.locator(sel).first
+                                if el.is_visible(timeout=1500):
+                                    el.fill(args.email)
+                                    break
+                            except Exception:
+                                continue
 
-            log_step("Menunggu redirect ke dashboard...")
-            time.sleep(6)
+                        # Fill password
+                        pw_el = page.locator("input[name='password'], input[type='password']").first
+                        if pw_el.is_visible(timeout=3000):
+                            pw_el.fill(args.password)
+                        time.sleep(1)
 
-            # Check for login errors
-            try:
-                err_text = page.locator("text=Complete the Turnstile, text=Invalid credentials, .error-message").first
-                if err_text.is_visible(timeout=1000):
-                    log_step(f"Login warning: Turnstile atau credentials error, retry...")
-            except Exception:
-                pass
+                        # Solve Turnstile on login page
+                        login_turnstile_solved = False
+                        try:
+                            token_val = page.evaluate("() => { const el = document.getElementsByName('cf_challenge_response')[0]; return el ? el.value : ''; }")
+                            if token_val and len(token_val.strip()) > 10:
+                                login_turnstile_solved = True
+                                log_step("Turnstile login auto-solved!")
+                        except Exception:
+                            pass
 
-            current_url = page.url
-            log_step(f"After login URL: {current_url}")
+                        if not login_turnstile_solved and args.captcha_key:
+                            log_step("Solve Turnstile login via 2Captcha...")
+                            login_token = solve_turnstile_2captcha(
+                                args.captcha_key,
+                                "https://dash.cloudflare.com/login",
+                                CF_SIGNUP_TURNSTILE_SITEKEY,
+                                timeout=120,
+                            )
+                            if login_token:
+                                inject_turnstile_token(page, login_token)
+                                login_turnstile_solved = True
+                                time.sleep(1)
+                                log_step("Turnstile login injected via 2Captcha!")
 
-            # Extract account_id from login redirect URL immediately
-            m = re.search(r"/([a-f0-9]{32})(?:/|$)", current_url)
-            if m:
-                _early_account_id = m.group(1)
-                log_step(f"Account ID from login URL: {_early_account_id[:8]}...")
-            else:
-                _early_account_id = ""
+                        # Submit
+                        for sel in ["button[type='submit']", "button:has-text('Sign in')", "button:has-text('Log in')"]:
+                            try:
+                                btn = page.locator(sel).first
+                                if btn.is_visible(timeout=1000):
+                                    btn.click()
+                                    break
+                            except Exception:
+                                continue
 
-        except Exception as e:
-            log_step(f"Login error: {e}")
-            _early_account_id = ""
+                        log_step("Menunggu redirect ke dashboard...")
+                        time.sleep(6)
+
+                        current_url = page.url
+                        log_step(f"After login URL: {current_url}")
+                        _m_after = re.search(r"/([a-f0-9]{32})(?:/|$)", current_url)
+                        if _m_after:
+                            _early_account_id = _m_after.group(1)
+                            log_step(f"Account ID from login URL: {_early_account_id[:8]}...")
+
+            except Exception as e:
+                log_step(f"Login error: {e}")
 
         # ── Step 8: Get to dashboard and extract account ID ───────────────────
         # If we already got account_id from login URL, skip navigation
