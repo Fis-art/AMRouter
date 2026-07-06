@@ -167,6 +167,8 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
       const isLeonardo = account.provider === "leonardo";
       const isWeavy = account.provider === "weavy";
       const isKimi = account.provider === "kimi-coding" || account.provider === "kimi";
+      const isQoder = account.provider === "qoder";
+      const isCloudflare = account.provider === "cloudflare";
       if (isLeonardo && !settings.leonardo_invite_link) {
         return reject(new Error("Leonardo invite link belum di-set di Settings."));
       }
@@ -178,6 +180,10 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
         ? path.resolve(process.cwd(), "src/automation/weavy_signup.py")
         : isKimi
         ? path.resolve(process.cwd(), "src/automation/kimi_signup.py")
+        : isQoder
+        ? path.resolve(process.cwd(), "src/automation/qoder_signup.py")
+        : isCloudflare
+        ? path.resolve(process.cwd(), "src/automation/cloudflare_signup.py")
         : path.resolve(process.cwd(), "src/automation/codebuddy_signup.py");
       const profilesDir = isLeonardo
         ? path.resolve(process.cwd(), "profiles/leonardo")
@@ -185,6 +191,10 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
         ? path.resolve(process.cwd(), "profiles/weavy")
         : isKimi
         ? path.resolve(process.cwd(), "profiles/kimi")
+        : isQoder
+        ? path.resolve(process.cwd(), "profiles/qoder")
+        : isCloudflare
+        ? path.resolve(process.cwd(), "profiles/cloudflare")
         : path.resolve(process.cwd(), "profiles/codebuddy");
 
       const args = [
@@ -203,6 +213,20 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
         if (settings.codebuddy_leave_canva_team === "1") {
           args.push("--leave-canva-team");
         }
+      } else if (isCloudflare) {
+        const ammailSettings = settings;
+        const ammailBaseUrl = ammailSettings.ammail_base_url || "";
+        const ammailApiKey = ammailSettings.ammail_api_key || "";
+        const ammailDomain = ammailSettings.ammail_default_domain || "";
+        if (ammailBaseUrl && ammailApiKey && ammailDomain) {
+          args.push(`--ammail-base-url=${ammailBaseUrl}`);
+          args.push(`--ammail-api-key=${ammailApiKey}`);
+          args.push(`--ammail-domain=${ammailDomain}`);
+        }
+        const captchaKey = settings.codebuddy_2captcha_api_key || "";
+        if (captchaKey) {
+          args.push(`--2captcha-key=${captchaKey}`);
+        }
       } else if (isWeavy) {
         if (account.signupMethod === "google" || (account.email && (account.email.endsWith("@gmosel.com") || account.email.endsWith("@gmail.com")))) {
           args.push("--gsuite");
@@ -214,7 +238,7 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
         args.push("--headless");
       }
 
-      if (settings.codebuddy_proxy_enabled === "1" && settings.codebuddy_proxy_pool) {
+      if (settings.codebuddy_proxy_enabled === "1" && settings.codebuddy_proxy_pool && !isQoder) {
         try {
           const pool = JSON.parse(settings.codebuddy_proxy_pool);
           if (Array.isArray(pool) && pool.length > 0) {
@@ -235,8 +259,10 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
       }
 
       try {
+        const logDir = "/home/ahwanulm/.9router-v2/logs";
+        fs.mkdirSync(logDir, { recursive: true });
         fs.appendFileSync(
-          "/home/ahwanulm/.9router-v2/logs/automation_spawn.log",
+          `${logDir}/automation_spawn.log`,
           `[${new Date().toISOString()}] [id]/route.js spawning python: ${venvPython} ${args.join(" ")}\n`
         );
       } catch (err) {
@@ -285,18 +311,19 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
                 ok: true
               });
 
-              if (settings.codebuddy_auto_9router === "1" || isLeonardo || isWeavy || isKimi) {
+
+              if (settings.codebuddy_auto_9router === "1" || isLeonardo || isWeavy || isKimi || isQoder || isCloudflare) {
                 try {
                   const provider = account.provider || "codebuddy";
                   const connData = {
                     provider: provider,
-                    authType: (isLeonardo || isWeavy) ? "cookie" : isKimi ? "oauth" : "apikey",
+                    authType: (isLeonardo || isWeavy) ? "cookie" : (isKimi || isQoder) ? "oauth" : "apikey",
                     name: account.email,
                     apiKey: apiKeyToSave,
                     email: account.email,
                     priority: 1,
                     isActive: true,
-                    testStatus: (isLeonardo || isWeavy || isKimi) ? "active" : "unknown",
+                    testStatus: (isLeonardo || isWeavy || isKimi || isQoder || isCloudflare) ? "active" : "unknown",
                   };
 
                   if (isLeonardo || isWeavy) {
@@ -305,7 +332,7 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
                     if (isLeonardo || isWeavy) {
                       connData.accessToken = parsed.jwt;
                       connData.cached_jwt = parsed.jwt;
-                      connData.jwt_expires_at = Math.floor(Date.now() / 1000) + 1800; // expires in 30 mins
+                      connData.jwt_expires_at = Math.floor(Date.now() / 1000) + 1800;
                     }
                     if (isWeavy && (parsed.firebase_refresh_token || parsed.firebase_api_key)) {
                       connData.providerSpecificData = {
@@ -313,19 +340,35 @@ function executeCodeBuddySignupSingle(accountId, jobId, settings) {
                         firebase_api_key: parsed.firebase_api_key || "",
                       };
                     }
+                  } else if (isCloudflare) {
+                    connData.provider = "cloudflare-ai";
+                    connData.authType = "apikey";
+                    connData.apiKey = parsed.api_key;
+                    connData.providerSpecificData = {
+                      accountId: parsed.account_id || "",
+                    };
                   } else if (isKimi) {
                     connData.accessToken = parsed.api_key;
                     connData.refreshToken = parsed.refresh_token;
                     connData.expiresAt = parsed.expires_in
                       ? new Date(Date.now() + parsed.expires_in * 1000).toISOString()
                       : null;
-                  } else if (provider === "kiro" || provider === "qoder") {
+                  } else if (isQoder) {
                     connData.accessToken = parsed.api_key;
-                    if (provider === "qoder") {
-                      connData.providerSpecificData = {
-                        userId: account.email,
-                      };
-                    }
+                    connData.refreshToken = parsed.refresh_token;
+                    connData.expiresAt = parsed.expires_in
+                      ? new Date(Date.now() + parsed.expires_in * 1000).toISOString()
+                      : null;
+                    connData.displayName = parsed.name || null;
+                    connData.email = parsed.email || account.email;
+                    connData.providerSpecificData = {
+                      authMethod: "device",
+                      userId: parsed.user_id || "",
+                      machineId: parsed.machine_id || "",
+                      organizationId: parsed.organization_id || "",
+                    };
+                  } else if (provider === "kiro") {
+                    connData.accessToken = apiKeyToSave;
                   }
 
                   await createProviderConnection(connData);
