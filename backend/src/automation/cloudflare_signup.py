@@ -1153,7 +1153,19 @@ def main():
                                 break
 
                         if otp_code:
-                            # Try dialog-specific selectors first to avoid cookie consent inputs
+                            # Dismiss consent overlay before looking for OTP input
+                            try:
+                                page.evaluate("""
+                                    () => {
+                                        const ot = document.querySelector('#onetrust-banner-sdk, #onetrust-consent-sdk');
+                                        if (ot) ot.style.display = 'none';
+                                    }
+                                """)
+                            except Exception: pass
+                            time.sleep(1)
+                            page.screenshot(path="/tmp/cf_otp_modal.png")
+
+                            # Try dialog-specific selectors first, then broader
                             otp_input = None
                             for otp_sel in [
                                 "[role='dialog'] input[type='text']",
@@ -1163,20 +1175,66 @@ def main():
                                 "input[placeholder*='code' i]",
                                 "input[placeholder*='verification' i]",
                                 "input[id*='code' i]",
+                                "input[name*='code' i]",
+                                "input[name*='otp' i]",
+                                # Broader: any visible text input except known cookie ones
+                                "input[type='text']:not([name='vendor-search-handler']):not([id='vendor-search-handler'])",
                             ]:
                                 try:
                                     el = page.locator(otp_sel).first
-                                    if el.count() > 0 and el.is_visible(timeout=2000):
+                                    if el.count() > 0 and el.is_visible(timeout=1500):
+                                        # Sanity check: not the cookie search input
+                                        el_id = el.get_attribute("id") or ""
+                                        el_name = el.get_attribute("name") or ""
+                                        if "vendor" in el_id or "vendor" in el_name:
+                                            continue
                                         otp_input = el
-                                        log_step(f"OTP input found: {otp_sel}")
+                                        log_step(f"OTP input found: {otp_sel} (id={el_id})")
                                         break
                                 except Exception:
                                     continue
+
+                            # Last resort: JS — find first visible input in any modal/overlay
+                            if not otp_input:
+                                js_sel = page.evaluate("""
+                                    () => {
+                                        const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+                                        const v = inputs.find(i => {
+                                            if (!i.offsetParent) return false;
+                                            const id = (i.id||'') + (i.name||'');
+                                            return !id.includes('vendor') && !id.includes('search');
+                                        });
+                                        return v ? (v.id || v.name || v.placeholder || 'found') : null;
+                                    }
+                                """)
+                                log_step(f"JS OTP input scan: {js_sel}")
+                                if js_sel:
+                                    try:
+                                        page.evaluate(f"""
+                                            () => {{
+                                                const inputs = Array.from(document.querySelectorAll('input[type="text"]'));
+                                                const v = inputs.find(i => {{
+                                                    if (!i.offsetParent) return false;
+                                                    const id = (i.id||'') + (i.name||'');
+                                                    return !id.includes('vendor') && !id.includes('search');
+                                                }});
+                                                if (v) {{
+                                                    v.focus();
+                                                    v.value = '{otp_code}';
+                                                    v.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                                    v.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                                }}
+                                            }}
+                                        """)
+                                        log_step(f"OTP filled via JS inject")
+                                    except Exception as jse:
+                                        log_step(f"JS OTP fill error: {jse}")
+
                             if otp_input:
                                 otp_input.fill(otp_code)
                                 time.sleep(0.5)
                             else:
-                                log_step("OTP input not found via dialog selectors")
+                                log_step("OTP input not found via any selector")
                                 for btn_sel in ["button:has-text('Verify')", "button:has-text('Continue')", "button:has-text('Submit')", "button[type='submit']"]:
                                     try:
                                         b = page.locator(btn_sel).first
