@@ -973,20 +973,23 @@ def main():
                         for _ in range(20):
                             time.sleep(5)
                             try:
-                                msgs = ammail_request(ammail_base_url, ammail_api_key,
+                                msgs_resp = ammail_request(ammail_base_url, ammail_api_key,
                                                       f"/inboxes/{urllib.parse.quote(email.split('@')[0])}/messages")
-                                for msg in (msgs if isinstance(msgs, list) else []):
+                                # ammail_request returns dict {"messages": [...]} not a list directly
+                                msgs_list = msgs_resp.get("messages", []) if isinstance(msgs_resp, dict) else (msgs_resp if isinstance(msgs_resp, list) else [])
+                                for msg in msgs_list:
                                     if 'cloudflare' in str(msg.get('from', '')).lower() or 'cloudflare' in str(msg.get('subject', '')).lower():
                                         mid = msg.get('id', '')
                                         full = ammail_request(ammail_base_url, ammail_api_key, f"/messages/{urllib.parse.quote(str(mid))}")
-                                        body = str(full.get('body', '') or full.get('html', '') or full.get('text', ''))
+                                        msg_body = full.get("message", full) if isinstance(full, dict) else {}
+                                        body = str(msg_body.get('body', '') or msg_body.get('html', '') or msg_body.get('text', '') or full.get('body', '') or full.get('html', '') or full.get('text', ''))
                                         m = re.search(r'\b(\d{6})\b', body)
                                         if m:
                                             otp_code = m.group(1)
                                             log_step(f"OTP untuk Global API Key: {otp_code}")
                                             break
-                            except Exception:
-                                pass
+                            except Exception as _otp_e:
+                                log_step(f"OTP poll error: {_otp_e}")
                             if otp_code:
                                 break
 

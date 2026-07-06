@@ -894,11 +894,12 @@ function executeCodeBuddySignup(accountId, jobId, idx, settings) {
               }
             } else if (parsed.status === "error") {
               done = true;
-              await markCodeBuddyError(account.id, parsed.message);
+              const errMsg = parsed.error || parsed.message || "Unknown error";
+              await markCodeBuddyError(account.id, errMsg);
               await updateCodeBuddyJobResult(jobId, idx, {
                 email: account.email,
                 status: "failed",
-                error: parsed.message,
+                error: errMsg,
                 ok: false
               });
             }
