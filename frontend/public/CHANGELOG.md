@@ -4,7 +4,48 @@ All notable changes to the decoupled **9Router v2** platform will be documented 
 
 ---
 
-## [v0.5.0] - 2026-07-06
+## [v0.6.0] - 2026-07-06
+
+### Added
+- **Usage API — Complete Provider Coverage**: Fully implemented usage/quota fetching for all supported providers:
+  - **GitHub Copilot**: Real quota snapshots (paid plan: chat/completions/premium; free plan: monthly limits + reset date)
+  - **Gemini CLI**: Per-model quota buckets via `cloudcode-pa.googleapis.com` with remaining fraction + reset time
+  - **Antigravity**: Model-level quota from `fetchAvailableModels` with subscription tier info
+  - **Claude**: OAuth usage endpoint (5h session + 7d weekly windows) with legacy org fallback
+  - **Codex (OpenAI)**: `chatgpt.com/backend-api/wham/usage` session + weekly rate limit windows
+  - **Kiro (AWS)**: `codewhisperer.us-east-1.amazonaws.com/getUsageLimits` multi-endpoint fallback
+  - **Qoder**: `openapi.qoder.sh/api/v2/quota/usage` with expiry parsing
+  - **GLM / GLM-CN**: `bigmodel.cn/api/monitor/usage/quota/limit` per-region with plan level
+  - **MiniMax / MiniMax-CN**: `coding_plan/remains` multi-URL fallback + M-series percent-only buckets
+  - **CodeBuddy**: `billing/ide/usage` with local DB fallback for `ck_` API keys (Tencent restriction)
+  - **Kimi Coding**: User profile endpoint for connection status
+  - **Cloudflare Workers AI**: `api.cloudflare.com/accounts/{id}/ai/usage` neurons + requests
+  - **Cursor**: `api2.cursor.sh/auth/stripe` membership type + expiry info
+  - **KiloCode**: `api.kilo.ai/api/user/profile` plan + credits
+  - **Cline**: `api.cline.bot/api/v1/auth/me` plan + credits
+
+- **Skills Page Improvements**:
+  - Skills now point to `ahwanulm/9router-v2` repo (previously `decolua/9router`)
+  - Added `using-superpowers` and `multi-brain` agent skills
+  - Page redesigned with 3 sections: Entry Point / API Capabilities / Agent Workflow
+  - Quick Start card with copy-prompt button
+
+- **Agent Instructions** (`.agents/AGENTS.md`): Workspace rule requiring changelog updates after every significant change
+
+### Changed
+- **Donate link**: Changed from modal to direct external link → `https://mayar.to/ahwanulm`
+- **Language picker removed**: Dashboard now defaults to English; language selection UI removed from header and profile page
+- **Changelog**: Now served from local `/CHANGELOG.md` static file, no longer fetched from upstream 9router repo
+
+### Removed
+- **Weavy AI provider**: Removed from `WEB_COOKIE_PROVIDERS` — automation scripts deleted
+- **Weavy AI usage**: Removed from `USAGE_SUPPORTED_PROVIDERS`
+- **Leonardo AI usage**: Removed from `USAGE_SUPPORTED_PROVIDERS` (provider kept as deprecated)
+- **Cookie Pool tab**: Removed from Automation page
+
+---
+
+## [v0.5.0] - 2026-07-04
 
 ### Added
 - **OIDC Authentication Support**: Added full support for OpenID Connect (Single Sign-On) and custom OIDC callback workflows.

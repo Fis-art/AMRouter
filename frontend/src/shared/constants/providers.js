@@ -173,8 +173,8 @@ export const APIKEY_PROVIDERS = {
 export const WEB_COOKIE_PROVIDERS = {
   "grok-web": { id: "grok-web", alias: "gw", name: "Grok Web (Subscription)", icon: "auto_awesome", color: "#1DA1F2", textIcon: "GW", website: "https://grok.com", authType: "cookie", authHint: "Paste your sso= cookie value from grok.com", passthroughModels: true, serviceKinds: ["llm"] },
   "perplexity-web": { id: "perplexity-web", alias: "pw", name: "Perplexity Web (Pro/Max)", icon: "search", color: "#20808D", textIcon: "PW", website: "https://www.perplexity.ai", authType: "cookie", authHint: "Paste your __Secure-next-auth.session-token cookie value from perplexity.ai", serviceKinds: ["llm"] },
-  leonardo: { id: "leonardo", alias: "leo", name: "Leonardo AI", icon: "brush", color: "#7C3AED", textIcon: "LEO", website: "https://app.leonardo.ai", authType: "cookie", authHint: "Open app.leonardo.ai → DevTools → Application → Cookies → copy the value of the '__Secure-next-auth.session-token' cookie (starts with eyJ...)", serviceKinds: ["image", "video"], notice: { signupUrl: "https://leonardo.ai" } },
-  weavy: { id: "weavy", alias: "weavy", name: "Weavy AI", icon: "palette", color: "#EC4899", textIcon: "WV", website: "https://app.weavy.ai", authType: "cookie", authHint: "Automatically created via automated signup, or paste your Weavy AI session cookies.", serviceKinds: ["image", "video"], logo: "/providers/weavy.jpeg", notice: { signupUrl: "https://weavy.ai" } },
+  leonardo: { id: "leonardo", alias: "leo", name: "Leonardo AI", icon: "brush", color: "#7C3AED", textIcon: "LEO", website: "https://app.leonardo.ai", authType: "cookie", authHint: "Open app.leonardo.ai → DevTools → Application → Cookies → copy the value of the '__Secure-next-auth.session-token' cookie (starts with eyJ...)", serviceKinds: ["image", "video"], notice: { signupUrl: "https://leonardo.ai" }, deprecated: true },
+  // weavy removed — automation scripts deleted in v0.6.0
 };
 
 // Media provider kinds — each kind maps to a route and endpoint config
@@ -280,8 +280,6 @@ export const USAGE_SUPPORTED_PROVIDERS = [
   "minimax",
   "minimax-cn",
   "codebuddy",
-  "leonardo",
-  "weavy",
   "cloudflare-ai",
 ];
 
