@@ -1405,32 +1405,52 @@ def main():
                                 page.screenshot(path="/tmp/cf_gak_before_ts.png")
                                 _ts_clicked = False
 
-                                # Use existing try_click_turnstile_checkbox() — it uses frame_element().bounding_box()
-                                log_step("GAK TS: calling try_click_turnstile_checkbox...")
-                                _ts_clicked = try_click_turnstile_checkbox(page)
-                                log_step(f"GAK TS click result: {_ts_clicked}")
-                                if _ts_clicked:
-                                    time.sleep(10)  # wait for Camoufox to auto-solve
-
-                                # Fallback: direct frame_element bounding box
-                                if not _ts_clicked:
+                                # Check if Turnstile iframe is present in modal
+                                _gak_ts_frame = next((f for f in page.frames if 'challenges.cloudflare.com' in (f.url or '')), None)
+                                if _gak_ts_frame:
+                                    log_step("GAK TS: Turnstile frame found, trying auto-click first...")
+                                    _ts_clicked = try_click_turnstile_checkbox(page)
+                                    log_step(f"GAK TS auto-click result: {_ts_clicked}")
+                                    if _ts_clicked:
+                                        time.sleep(8)  # wait for Camoufox auto-solve
+                                    # Check if still unsolved (modal still open after auto-click)
+                                    _modal_still_open = False
                                     try:
-                                        _ts_f = next((f for f in page.frames if 'challenges.cloudflare.com' in (f.url or '')), None)
-                                        if _ts_f:
-                                            _handle = _ts_f.frame_element()
-                                            _bb = _handle.bounding_box() if _handle else None
-                                            log_step(f"GAK TS frame_element bbox: {_bb}")
-                                            if _bb:
-                                                _tx = _bb["x"] + 28
-                                                _ty = _bb["y"] + 32
-                                                page.mouse.move(_tx, _ty, steps=10)
-                                                time.sleep(0.3)
-                                                page.mouse.click(_tx, _ty)
-                                                time.sleep(10)
-                                                log_step(f"GAK TS bbox click: ({_tx:.0f},{_ty:.0f})")
+                                        _modal_still_open = page.locator("[role='dialog']").is_visible(timeout=2000)
+                                    except Exception:
+                                        pass
+                                    # Fallback to 2Captcha if modal still open (headless mode)
+                                    if _modal_still_open and args.captcha_key:
+                                        log_step("GAK TS: auto-click failed (headless?), using 2Captcha...")
+                                        try:
+                                            _gak_sitekey = get_turnstile_sitekey(page)
+                                            _gak_ts_tok = solve_turnstile_2captcha(
+                                                args.captcha_key,
+                                                "https://dash.cloudflare.com/profile/api-tokens",
+                                                _gak_sitekey,
+                                                timeout=150,
+                                            )
+                                            if _gak_ts_tok:
+                                                # Inject token into the Turnstile response fields
+                                                page.evaluate(f"""
+                                                    () => {{
+                                                        for (const name of ['cf-turnstile-response', 'cf_challenge_response']) {{
+                                                            const els = document.getElementsByName(name);
+                                                            for (const el of els) {{
+                                                                el.value = '{_gak_ts_tok}';
+                                                                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                                            }}
+                                                        }}
+                                                    }}
+                                                """)
+                                                time.sleep(2)
+                                                log_step("GAK TS: 2Captcha token injected")
                                                 _ts_clicked = True
-                                    except Exception as _me:
-                                        log_step(f"GAK TS bbox err: {_me}")
+                                        except Exception as _2ce:
+                                            log_step(f"GAK TS 2Captcha error: {_2ce}")
+                                else:
+                                    log_step("GAK TS: no Turnstile iframe in modal (skip)")
+                                    _ts_clicked = True  # no Turnstile needed
 
                                 page.screenshot(path="/tmp/cf_gak_before_submit.png")
 
