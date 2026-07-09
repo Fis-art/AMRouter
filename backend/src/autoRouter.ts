@@ -33,11 +33,21 @@ function hasCatchAll(pathPart: string): boolean {
 }
 
 function toCatchAllRegex(pathPart: string): RegExp {
-  const base = pathPart
-    .replace(/\[\.\.\.([^\]]+)\]/g, "(.*)")
-    .replace(/\[([^\]]+)\]/g, "[^/]+")
-    .replace(/\//g, "\\/");
-  return new RegExp(`^\/${base}$`);
+  // Normalize path separators to forward slash for regex building
+  const normalized = pathPart.replace(/\\/g, "/");
+  
+  // Escape special regex characters FIRST
+  const escaped = normalized
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&"); // Escape all regex special chars
+  
+  // Now replace our special markers
+  const withCatchAll = escaped
+    .replace(/\\\[\\\.\\\.\\\.(.*?)\\\]/g, "(.*)")  // [...path] → (.*)
+    .replace(/\\\[([^\]]+)\\\]/g, "[^/]+");  // [id] → [^/]+
+  
+  const base = withCatchAll.replace(/\//g, "\\/");
+  
+  return new RegExp(`^\\/${base}$`);
 }
 
 /**
@@ -84,14 +94,15 @@ export async function buildAutoRouter(): Promise<Router> {
   const router = Router();
   const routeFiles = findRouteFiles(ROUTES_DIR);
   routeFiles.sort((a, b) => {
-    const relA = relative(ROUTES_DIR, a);
-    const relB = relative(ROUTES_DIR, b);
+    const relA = relative(ROUTES_DIR, a).replace(/\\/g, "/"); // Normalize to forward slash
+    const relB = relative(ROUTES_DIR, b).replace(/\\/g, "/");
     return compareRoutePaths(relA, relB);
   });
   let mounted = 0;
 
   for (const file of routeFiles) {
-    const rel = relative(ROUTES_DIR, file);
+    // Normalize path separator to forward slash for consistent handling
+    const rel = relative(ROUTES_DIR, file).replace(/\\/g, "/");
     const pathPart = rel.replace(/\/route\.[jt]s$/, "");
     const isCatchAll = hasCatchAll(pathPart);
     const expressPath: string | RegExp = isCatchAll
@@ -180,7 +191,7 @@ export async function buildAutoRouter(): Promise<Router> {
 
   if (process.env.DEBUG_ROUTES) {
     console.log('[router] Mounted paths:', routeFiles.map(f => {
-      const rel = relative(ROUTES_DIR, f);
+      const rel = relative(ROUTES_DIR, f).replace(/\\/g, "/");
       const pp = rel.replace(/\/route\.[jt]s$/, '');
       return '/' + pp.split('/').map(nextToExpress).join('/');
     }));

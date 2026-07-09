@@ -34,7 +34,8 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ─── Auth Middleware ───────────────────────────────────────────────────────────
-app.use(authMiddleware);
+// DISABLED for development - Full open access
+// app.use(authMiddleware);
 
 // ─── Auto-mount all routes ────────────────────────────────────────────────────
 async function start() {
@@ -54,10 +55,10 @@ async function start() {
     apiRouter(req, res, next);
   });
 
-  // ─── 404 Fallback ──────────────────────────────────────────────────────────
+  // ─── 404 Fallback ──────────────────────────────────────────────────────
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
-  // ─── Error Handler ─────────────────────────────────────────────────────────
+  // ─── Error Handler ─────────────────────────────────────────────────────
   app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error("[server] unhandled error:", err);
     if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
@@ -66,7 +67,8 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`\n🚀 9Router Backend v2 running on http://localhost:${PORT}`);
     console.log(`   Frontend origin: ${FRONTEND_ORIGIN}`);
-    console.log(`   Environment: ${process.env.NODE_ENV || "development"}\n`);
+    console.log(`   Environment: ${process.env.NODE_ENV || "development"}`);
+    console.log(`   ⚠️  AUTH DISABLED - Full open access (development only)\n`);
   });
 }
 
@@ -76,4 +78,3 @@ start().catch((err) => {
 });
 
 export { app };
-
