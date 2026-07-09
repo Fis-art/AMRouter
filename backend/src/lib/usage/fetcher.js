@@ -123,7 +123,7 @@ export async function getUsageForProvider(connection, proxyOptions = null) {
     case "kimi-coding":
       return await getKimiCodingUsage(accessToken, proxyOptions);
     case "cloudflare-ai":
-      return await getCloudflareUsage(apiKey, providerSpecificData, proxyOptions);
+      return await getCloudflareUsage(connection, proxyOptions);
     case "cursor":
       return await getCursorUsage(accessToken, providerSpecificData, proxyOptions);
     case "kilocode":
@@ -1527,68 +1527,74 @@ async function getKimiCodingUsage(accessToken, proxyOptions = null) {
 
 // ─── Cloudflare Workers AI ────────────────────────────────────────────────────
 
-async function getCloudflareUsage(apiKey, providerSpecificData, proxyOptions = null) {
+async function getCloudflareUsage(connection, proxyOptions = null) {
   try {
+    const { id: connectionId, providerSpecificData, errorCode, lastError } = connection;
     const accountId = providerSpecificData?.accountId;
     if (!accountId) {
       return { message: "Cloudflare: missing Account ID in provider settings." };
     }
 
-    // Try Cloudflare AI usage endpoint
-    const response = await proxyAwareFetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/usage`,
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
-        },
-      },
-      proxyOptions
-    );
+    // CF does not expose REST/GraphQL usage for scoped tokens.
+    // Use local 9router request logs (usageDaily.byAccount) for real-time tracking.
+    // Neurons ≈ tokens processed (rough 1:1 approximation for free-tier planning).
+    const CF_DAILY_QUOTA = 10000;
+    const isExhausted = errorCode === 429 || errorCode === "429";
 
-    if (response.ok) {
-      const data = await response.json();
-      const result = data?.result || {};
-      return {
-        status: "active",
-        accountId,
-        usage: {
-          neurons: result?.neurons_used ?? result?.total_neurons,
-          requests: result?.total_requests,
-          periodStart: result?.period_start,
-          periodEnd: result?.period_end,
-        },
-        note: "Cloudflare Workers AI — free tier: 10,000 neurons/day.",
-      };
+    // Reset time: CF resets daily at midnight UTC
+    const now = new Date();
+    const resetAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
+
+    // Read today's actual token usage from local DB
+    let neuronsUsed = 0;
+    try {
+      const { getDailyUsageByConnection } = await import("../../lib/db/index.js");
+      const daily = await getDailyUsageByConnection(connectionId);
+      if (daily) {
+        // CF neuron pricing: output tokens drive 90%+ of cost.
+        // Input tokens are cheap (cached/batched). Use only completion_tokens as proxy.
+        // CF free tier: ~10,000 neurons/day ≈ ~1,000-5,000 output tokens depending on model.
+        // We count requests instead as simplest proxy when output tokens are too small.
+        const outTokens = daily.completionTokens || 0;
+        // Each request approximated as 100 neurons (model overhead + output)
+        const requestNeurons = (daily.requests || 0) * 100;
+        neuronsUsed = Math.max(outTokens, requestNeurons);
+        // If already exhausted (429), show as full
+        if (isExhausted && neuronsUsed < CF_DAILY_QUOTA) neuronsUsed = CF_DAILY_QUOTA;
+      } else if (isExhausted) {
+        neuronsUsed = CF_DAILY_QUOTA;
+      }
+    } catch (_) {
+      // DB read failed — fallback to errorCode-based detection
+      neuronsUsed = isExhausted ? CF_DAILY_QUOTA : 0;
     }
 
-    // Fallback: verify account exists
-    const verifyRes = await proxyAwareFetch(
-      `https://api.cloudflare.com/client/v4/accounts/${accountId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
+
+    // Cap at daily quota (over-counting possible with multi-account rotation)
+    const displayUsed = Math.min(neuronsUsed, CF_DAILY_QUOTA);
+
+    return {
+      status: isExhausted ? "rate_limited" : "active",
+      accountId,
+      quotas: {
+        "Workers AI": {
+          used: displayUsed,
+          total: CF_DAILY_QUOTA,
+          resetAt,
+          unit: "neurons",
+          exhausted: isExhausted,
+          note: "Tracked locally (tokens ≈ neurons). Resets midnight UTC.",
         },
       },
-      proxyOptions
-    );
-
-    if (verifyRes.ok) {
-      const vData = await verifyRes.json();
-      return {
-        status: "active",
-        accountId,
-        accountName: vData?.result?.name,
-        note: "Cloudflare connected. Check Cloudflare Dashboard for detailed usage.",
-      };
-    }
-
-    return { message: "Cloudflare connected. Check Cloudflare Dashboard for usage." };
+      note: isExhausted
+        ? `Quota exhausted. Resets at midnight UTC. Last error: ${lastError?.slice?.(0, 80) || "429"}`
+        : `Cloudflare Workers AI — ${displayUsed.toLocaleString()} / ${CF_DAILY_QUOTA.toLocaleString()} neurons used today.`,
+    };
   } catch (error) {
     return { message: `Cloudflare: ${error.message}` };
   }
 }
+
 
 // ─── Cursor ───────────────────────────────────────────────────────────────────
 

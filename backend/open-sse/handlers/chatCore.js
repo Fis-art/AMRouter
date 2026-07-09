@@ -141,25 +141,70 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("CODEBUDDY", "Sanitized system prompt for Tencent content moderation");
   }
 
-  // Cloudflare Workers AI: cap max_tokens + truncate messages to prevent runaway reasoning.
-  // Free tier has ~75s execution limit and very limited compute.
-  // 104K tokens context = always slow/timeout. Keep last 20 msgs to stay under ~25K tokens.
+  // Cloudflare Workers AI: cap max_tokens to prevent runaway reasoning output.
+  // Free tier has ~75s execution limit. Cap output tokens only — do NOT truncate messages.
   if (provider === "cloudflare-ai") {
-    // Cap output tokens
-    if (!translatedBody.max_tokens) {
-      translatedBody.max_tokens = 8192;
+    const isReasoningModel = stripList?.includes("thinking");
+    const cfMaxTokens = isReasoningModel ? 4096 : 8192;
+    if (!translatedBody.max_tokens || translatedBody.max_tokens > cfMaxTokens) {
+      translatedBody.max_tokens = cfMaxTokens;
     }
 
-    // Truncate messages: keep system (idx 0) + last 20 non-system messages
-    if (Array.isArray(translatedBody.messages) && translatedBody.messages.length > 22) {
-      const system = translatedBody.messages[0]?.role === "system" ? [translatedBody.messages[0]] : [];
-      const nonSystem = translatedBody.messages.filter(m => m.role !== "system");
-      const kept = nonSystem.slice(-20); // last 20 messages
-      const before = translatedBody.messages.length;
-      translatedBody.messages = [...system, ...kept];
-      log?.info?.("CF-AI", `Truncated ${before} → ${translatedBody.messages.length} msgs (kept last 20 + system)`);
+    // Cloudflare has very strict Zod validation: content arrays may only contain
+    // {type:"text"} and {type:"image_url"}. Anything else (tool_result, thinking,
+    // redacted_thinking, etc.) will cause a 400. Run a final sanitizer pass to
+    // ensure the translated body is clean before sending to Cloudflare.
+    if (Array.isArray(translatedBody.messages)) {
+      const sanitized = [];
+      for (const msg of translatedBody.messages) {
+        if (Array.isArray(msg.content)) {
+          // Convert any remaining tool_result blocks to role:tool messages
+          const toolResultBlocks = msg.content.filter(b => b.type === "tool_result");
+          const otherBlocks = msg.content.filter(b => b.type !== "tool_result");
+
+          if (toolResultBlocks.length > 0) {
+            for (const tr of toolResultBlocks) {
+              let content = "";
+              if (typeof tr.content === "string") content = tr.content;
+              else if (Array.isArray(tr.content)) content = tr.content.filter(c => c.type === "text").map(c => c.text).join("\n");
+              else if (tr.content) content = JSON.stringify(tr.content);
+              sanitized.push({ role: "tool", tool_call_id: tr.tool_use_id || tr.tool_call_id || `tool_${Date.now()}`, content });
+            }
+            if (otherBlocks.length > 0) {
+              // Keep remaining content, filtering to only CF-allowed types
+              const cfSafe = otherBlocks
+                .filter(b => b.type === "text" || b.type === "image_url")
+                .map(b => b.type === "text" ? { type: "text", text: b.text || "" } : b);
+              if (cfSafe.length === 1 && cfSafe[0].type === "text") {
+                sanitized.push({ ...msg, content: cfSafe[0].text });
+              } else if (cfSafe.length > 0) {
+                sanitized.push({ ...msg, content: cfSafe });
+              }
+            }
+          } else {
+            // Filter content to only CF-allowed block types
+            const cfSafe = msg.content
+              .filter(b => b.type === "text" || b.type === "image_url")
+              .map(b => b.type === "text" ? { type: "text", text: b.text || "" } : b);
+            if (cfSafe.length === 0) {
+              // All blocks were filtered out — keep as empty string to preserve ordering
+              sanitized.push({ ...msg, content: "" });
+            } else if (cfSafe.length === 1 && cfSafe[0].type === "text") {
+              sanitized.push({ ...msg, content: cfSafe[0].text });
+            } else {
+              sanitized.push({ ...msg, content: cfSafe });
+            }
+          }
+        } else {
+          sanitized.push(msg);
+        }
+      }
+      translatedBody.messages = sanitized;
     }
   }
+
+
+
 
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);

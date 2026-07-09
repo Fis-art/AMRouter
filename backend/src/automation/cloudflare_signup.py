@@ -69,7 +69,7 @@ def create_ammail_inbox(base_url, api_key, email):
     except Exception:
         pass  # might already exist
 
-def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
+def wait_for_cf_verify_email(base_url, api_key, email, timeout=240):
     log_step(f"Menunggu email verifikasi Cloudflare ({email})...")
     alias = email.split("@")[0]
     deadline = time.time() + timeout
@@ -84,7 +84,17 @@ def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
                 if msg_id in seen_ids:
                     continue
                 seen_ids.add(msg_id)
-                if "cloudflare" in subject.lower() or "verify" in subject.lower() or "confirm" in subject.lower():
+                # Broader subject matching — CF sometimes uses different subject lines
+                subj_lower = subject.lower()
+                is_cf_email = (
+                    "cloudflare" in subj_lower or
+                    "verify" in subj_lower or
+                    "confirm" in subj_lower or
+                    "email" in subj_lower or
+                    "activate" in subj_lower or
+                    "validate" in subj_lower
+                )
+                if is_cf_email:
                     # Fetch full message body
                     try:
                         full = ammail_request(base_url, api_key, f"/messages/{urllib.parse.quote(msg_id)}")
@@ -110,10 +120,69 @@ def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
     return None
 
 # ── 2Captcha Turnstile solver ───────────────────────────────────────────────────
+# Hardcoded sitekey as fallback — scraping from page is preferred (see get_turnstile_sitekey)
 CF_SIGNUP_TURNSTILE_SITEKEY = "0x4AAAAAAAJel0iaAR3mgkjp"
 CF_SIGNUP_PAGE_URL = "https://dash.cloudflare.com/sign-up"
 
-def solve_turnstile_2captcha(api_key, page_url, sitekey, timeout=120):
+def get_turnstile_sitekey(page, fallback=CF_SIGNUP_TURNSTILE_SITEKEY):
+    """Scrape the actual Turnstile sitekey from page — avoids hardcode becoming stale."""
+    try:
+        sitekey = page.evaluate(
+            r"""
+            () => {
+                // Method 1: data-sitekey attribute
+                const el = document.querySelector('[data-sitekey]');
+                if (el) return el.getAttribute('data-sitekey');
+                // Method 2: inside Turnstile iframe src
+                for (const iframe of document.querySelectorAll('iframe')) {
+                    const src = iframe.src || '';
+                    const m = src.match(/[?&]sitekey=([^&]+)/);
+                    if (m) return decodeURIComponent(m[1]);
+                }
+                // Method 3: window.__CF$cv$params
+                try {
+                    const raw = JSON.stringify(window.__CF$cv$params || {});
+                    const m2 = raw.match(/sitekey["']?\s*:\s*["']([^"']+)["']/);
+                    if (m2) return m2[1];
+                } catch(e) {}
+                return null;
+            }
+        """
+        )
+        if sitekey and len(sitekey.strip()) > 10:
+            log_step(f"Sitekey dari halaman: {sitekey}")
+            return sitekey.strip()
+    except Exception as e:
+        log_step(f"get_turnstile_sitekey error: {e}")
+    log_step(f"Pakai sitekey hardcode: {fallback}")
+    return fallback
+
+
+def get_turnstile_action(page, default=None):
+    """Extract data-action from Turnstile widget on page."""
+    try:
+        action = page.evaluate(r"""
+            () => {
+                // Method 1: data-action on cf-turnstile div
+                const el = document.querySelector('[data-action], .cf-turnstile, [data-cf-turnstile-response]');
+                if (el && el.getAttribute('data-action')) return el.getAttribute('data-action');
+                // Method 2: scan iframe src for action param
+                for (const iframe of document.querySelectorAll('iframe')) {
+                    const src = iframe.src || '';
+                    const m = src.match(/[?&]action=([^&]+)/);
+                    if (m) return decodeURIComponent(m[1]);
+                }
+                return null;
+            }
+        """)
+        if action:
+            return action.strip()
+    except Exception:
+        pass
+    return default
+
+
+def solve_turnstile_2captcha(api_key, page_url, sitekey, timeout=120, action=None, data=None):
     """Submit Turnstile to 2Captcha and wait for solution token."""
     log_step("Mengirim Turnstile ke 2Captcha untuk diselesaikan...")
     try:
@@ -125,6 +194,11 @@ def solve_turnstile_2captcha(api_key, page_url, sitekey, timeout=120):
             "pageurl": page_url,
             "json": 1,
         }
+        if action:
+            submit_data["action"] = action
+            log_step(f"2Captcha Turnstile action: {action}")
+        if data:
+            submit_data["data"] = data
         encoded = urllib.parse.urlencode(submit_data).encode()
         req = urllib.request.Request("https://2captcha.com/in.php", data=encoded)
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -315,11 +389,23 @@ def create_workers_ai_token(global_key, email, account_id, token_name="9router W
         # Get permission groups
         r = cf_api_call(f"/accounts/{account_id}/tokens/permission_groups", global_key, email)
         groups = r.get("result", [])
-        read_g = next((g for g in groups if "workers ai" in g["name"].lower() and "read" in g["name"].lower()), None)
-        edit_g = next((g for g in groups if "workers ai" in g["name"].lower() and "edit" in g["name"].lower()), None)
+        # Exact match first: "Workers AI Read" not "Workers AI Metadata Read"
+        def _match_wa(groups, keyword):
+            # 1. exact match: name == "Workers AI <keyword>"
+            exact = next((g for g in groups if g["name"].lower() == f"workers ai {keyword}"), None)
+            if exact: return exact
+            # 2. starts with "Workers AI " and ends with keyword (avoid Metadata)
+            ends = next((g for g in groups if g["name"].lower().startswith("workers ai ") and
+                         g["name"].lower().endswith(keyword) and "metadata" not in g["name"].lower()), None)
+            if ends: return ends
+            # 3. fallback: contains both keywords, exclude metadata
+            return next((g for g in groups if "workers ai" in g["name"].lower() and
+                         keyword in g["name"].lower() and "metadata" not in g["name"].lower()), None)
+        read_g = _match_wa(groups, "read")
+        edit_g = _match_wa(groups, "write") or _match_wa(groups, "edit")
         if not read_g or not edit_g:
-            # fallback: first two that match workers ai
-            wa = [g for g in groups if "workers ai" in g["name"].lower()]
+            # fallback: use Write as both
+            wa = [g for g in groups if "workers ai" in g["name"].lower() and "metadata" not in g["name"].lower()]
             if len(wa) >= 2:
                 read_g, edit_g = wa[0], wa[1]
             elif len(wa) == 1:
@@ -676,18 +762,32 @@ def main():
         log_step("Menangani Turnstile captcha...")
         time.sleep(3)
 
-        # First try auto-solve (works sometimes in non-headless)
+        # First try auto-solve with retry — checks both cf_challenge_response and cf-turnstile-response
         turnstile_solved = False
-        wait_for_cf_clearance(page, timeout=10)
+        for _ts_attempt in range(3):
+            wait_for_cf_clearance(page, timeout=10)
+            try:
+                token_val = page.evaluate("""
+                    () => {
+                        const names = ['cf-turnstile-response', 'cf_challenge_response', 'cf-turnstile-response-0'];
+                        for (const n of names) {
+                            const el = document.querySelector(`input[name="${n}"]`) || document.getElementById(n);
+                            if (el && el.value && el.value.length > 10) return el.value;
+                        }
+                        return '';
+                    }
+                """)
+                if token_val and len(token_val.strip()) > 10:
+                    turnstile_solved = True
+                    log_step(f"Turnstile auto-solved! (attempt {_ts_attempt+1})")
+                    break
+            except Exception:
+                pass
+            if _ts_attempt < 2:
+                time.sleep(3)
 
-        # Check if already solved
-        try:
-            token_val = page.evaluate("() => { const el = document.getElementsByName('cf_challenge_response')[0]; return el ? el.value : ''; }")
-            if token_val and len(token_val.strip()) > 10:
-                turnstile_solved = True
-                log_step("Turnstile auto-solved!")
-        except Exception:
-            pass
+        # Scrape actual sitekey from page (not hardcode)
+        actual_sitekey = get_turnstile_sitekey(page)
 
         # Fallback: 2Captcha
         if not turnstile_solved and args.captcha_key:
@@ -695,8 +795,8 @@ def main():
             token_2c = solve_turnstile_2captcha(
                 args.captcha_key,
                 CF_SIGNUP_PAGE_URL,
-                CF_SIGNUP_TURNSTILE_SITEKEY,
-                timeout=120,
+                actual_sitekey,
+                timeout=150,
             )
             if token_2c:
                 inject_turnstile_token(page, token_2c)
@@ -737,11 +837,14 @@ def main():
         try:
             page_text_lower = page.evaluate("document.body.innerText").lower()
             log_step(f"Post-signup page snippet: {page_text_lower[:200]}")
+            # Only treat as already-registered if CF explicitly says so
             already_kw = [
                 "already registered", "already exists", "already in use",
                 "already taken", "account exists", "email exists",
-                "sudah terdaftar", "already have an account",
-                "email address is already"
+                "sudah terdaftar",
+                "email address is already",
+                # NOTE: "already have an account?" is NOT here — it's just the
+                # normal sign-in link on CF's signup page, not an error message
             ]
             for kw in already_kw:
                 if kw in page_text_lower:
@@ -751,23 +854,64 @@ def main():
         except Exception as e:
             log_step(f"Post-signup check error: {e}")
 
-        # Also check: if no "check your email" / "verify" success message → assume registered
-        if not email_already_registered:
-            try:
-                success_kw = ["check your email", "verify your email", "verification email", "link has been sent"]
-                if not any(kw in page_text_lower for kw in success_kw):
-                    # Not success AND not "already registered" → check URL
-                    # If still on signup page (no redirect), likely email exists (CF resent silently)
-                    if "sign-up" in page.url or "register" in page.url or page.url.endswith("/sign-up"):
-                        log_step(f"Still on signup URL after submit — treating as email_already_registered")
+        # Detect success: "check your email" / verify message
+        signup_success_verify = False
+        try:
+            success_kw = ["check your email", "verify your email", "verification email", "link has been sent"]
+            if any(kw in page_text_lower for kw in success_kw):
+                signup_success_verify = True
+                log_step("Signup sukses: CF meminta verifikasi email")
+        except Exception:
+            pass
+
+        # If signup not detected as success, wait longer — CF may still be processing
+        if not signup_success_verify and not email_already_registered:
+            log_step("Signup status unclear — waiting 10s for CF to redirect...")
+            for _sw in range(5):
+                time.sleep(2)
+                _cur_url = page.url
+                # Any URL change away from signup/login = success
+                if 'dash.cloudflare.com/login' not in _cur_url and 'dash.cloudflare.com' in _cur_url:
+                    log_step(f"CF redirect detected after signup: {_cur_url[:60]}")
+                    signup_success_verify = True
+                    break
+                # Also re-check body text
+                try:
+                    _recheck = page.evaluate("document.body.innerText").lower()
+                    if any(kw in _recheck for kw in ["check your email", "verify your email", "verification email"]):
+                        signup_success_verify = True
+                        log_step("Signup sukses terdeteksi (delayed)")
+                        break
+                    if any(kw in _recheck for kw in ["already registered", "already exists", "email exists"]):
                         email_already_registered = True
-            except Exception:
-                pass
+                        log_step("Email sudah terdaftar (delayed detect)")
+                        break
+                except Exception:
+                    pass
+            if not signup_success_verify and not email_already_registered:
+                log_step(f"Signup state masih unclear setelah wait. URL: {page.url[:80]}")
 
         if email_already_registered:
             # Navigate FRESH to /login (don't carry stale security_token from verify link)
-            page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=30000)
+            # Use try/except — CF SPA can abort domcontentloaded with NS_BINDING_ABORTED
+            for _goto_attempt in range(3):
+                try:
+                    page.goto("https://dash.cloudflare.com/login",
+                              wait_until="domcontentloaded", timeout=30000)
+                    break
+                except Exception as _ge:
+                    if "NS_BINDING_ABORTED" in str(_ge) or "net::ERR_ABORTED" in str(_ge):
+                        log_step(f"Login goto aborted (attempt {_goto_attempt+1}), retry with commit...")
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=10000)
+                            break
+                        except Exception:
+                            time.sleep(2)
+                    else:
+                        log_step(f"Login goto error: {_ge}")
+                        break
             time.sleep(3)
+
 
 
         # ── Step 6: Email verification ────────────────────────────────────────
@@ -776,16 +920,29 @@ def main():
                 args.ammail_base_url,
                 args.ammail_api_key,
                 args.email,
-                timeout=180,
+                timeout=240,
             )
             if verify_link:
                 log_step(f"Membuka link verifikasi...")
                 try:
                     page.goto(verify_link, wait_until="domcontentloaded", timeout=30000)
                     wait_for_cf_clearance(page, timeout=20)
-                    time.sleep(3)
+                    # Wait for CF SPA to execute email verification API call
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
+                    time.sleep(5)  # extra wait for React verification to complete
+                    _vurl = page.url
+                    _vbody = ""
+                    try:
+                        _vbody = page.evaluate("document.body.innerText").lower()[:200]
+                    except Exception:
+                        pass
+                    log_step(f"After verify link — URL: {_vurl[:80]}, body: {_vbody[:150]}")
                 except Exception as e:
                     log_step(f"Warning navigasi verify link: {e}")
+
             else:
                 log_step("Email verifikasi tidak diterima dalam 2 menit, lanjut coba login...")
         elif email_already_registered:
@@ -806,7 +963,21 @@ def main():
         else:
             log_step("Login ke Cloudflare Dashboard...")
             try:
-                page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
+                for _goto_attempt2 in range(3):
+                    try:
+                        page.goto("https://dash.cloudflare.com/login",
+                                  wait_until="domcontentloaded", timeout=20000)
+                        break
+                    except Exception as _ge2:
+                        if "NS_BINDING_ABORTED" in str(_ge2) or "net::ERR_ABORTED" in str(_ge2):
+                            log_step(f"Login goto aborted (attempt {_goto_attempt2+1}), wait for load...")
+                            try:
+                                page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                break
+                            except Exception:
+                                time.sleep(2)
+                        else:
+                            raise
                 time.sleep(2)
 
                 # Check if already redirected to dashboard
@@ -922,11 +1093,12 @@ def main():
 
                         if not login_turnstile_solved and args.captcha_key:
                             log_step("Solve Turnstile login via 2Captcha...")
+                            login_sitekey = get_turnstile_sitekey(page)
                             login_token = solve_turnstile_2captcha(
                                 args.captcha_key,
                                 "https://dash.cloudflare.com/login",
-                                CF_SIGNUP_TURNSTILE_SITEKEY,
-                                timeout=120,
+                                login_sitekey,
+                                timeout=150,
                             )
                             if login_token:
                                 inject_turnstile_token(page, login_token)
@@ -950,11 +1122,23 @@ def main():
 
                         current_url = page.url
                         log_step(f"After login URL: {current_url}")
-                        # If still on login, log error text
+                        # If still on login, check for error
                         if "/login" in current_url:
                             try:
                                 err_txt = page.evaluate("document.body.innerText")
                                 log_step(f"Login page text (first 300): {err_txt[:300]}")
+                                # Detect wrong password — stop immediately, do not proceed to dashboard
+                                login_fail_kw = [
+                                    "incorrect email or password",
+                                    "invalid email or password",
+                                    "wrong password",
+                                    "email or password is incorrect",
+                                    "authentication failed",
+                                ]
+                                if any(kw in err_txt.lower() for kw in login_fail_kw):
+                                    die(f"Login gagal: password salah untuk {args.email}. Akun CF ini mungkin sudah ada dengan password berbeda.")
+                            except SystemExit:
+                                raise
                             except Exception:
                                 pass
                         _m_after = re.search(r"/([a-f0-9]{32})(?:/|$)", current_url)
@@ -962,6 +1146,8 @@ def main():
                             _early_account_id = _m_after.group(1)
                             log_step(f"Account ID from login URL: {_early_account_id[:8]}...")
 
+            except SystemExit:
+                raise
             except Exception as e:
                 log_step(f"Login error: {e}")
 
@@ -1087,9 +1273,30 @@ def main():
             import requests as _req
             log_step("Mencoba ambil Global API Key dari dashboard...")
             try:
-                # Navigate to API keys page — force reload so Global API Key section is visible
-                page.goto("https://dash.cloudflare.com/profile/api-tokens", wait_until="domcontentloaded", timeout=20000)
-                time.sleep(3)
+                # Navigate to API keys page — CF React SPA takes time to mount.
+                # Retry navigate + wait up to 3x if still showing loading spinner.
+                for _nav_attempt in range(3):
+                    page.goto("https://dash.cloudflare.com/profile/api-tokens", wait_until="domcontentloaded", timeout=25000)
+                    # Wait for actual content (not just loading spinner)
+                    _page_ready = False
+                    for _wait_sel in [
+                        "text=Global API Key",
+                        "button:has-text('View')",
+                        "h1, h2, h3, [role='heading']",
+                    ]:
+                        try:
+                            page.wait_for_selector(_wait_sel, timeout=12000)
+                            log_step(f"API tokens page ready via: {_wait_sel}")
+                            _page_ready = True
+                            break
+                        except Exception:
+                            continue
+                    if _page_ready:
+                        break
+                    log_step(f"API tokens page not ready (attempt {_nav_attempt+1}), retry...")
+                    time.sleep(3)
+
+                time.sleep(2)
                 page.screenshot(path="/tmp/cf_gak_page.png")
                 _pg_txt = page.inner_text("body")
                 _gidx = _pg_txt.find("Global")
@@ -1097,7 +1304,58 @@ def main():
 
                 # Scroll to bottom to reveal Global API Key section
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(1)
+                time.sleep(2)
+
+                # Intercept CF API response to capture Global API Key from network
+                _intercepted_key = []
+                _captcha_challenge = {}  # captures context=apikey challenge response
+                def _on_gak_response(resp):
+                    try:
+                        url = resp.url
+                        if 'cloudflare.com/api' in url or '/api/v4/' in url:
+                            log_step(f"CF API call: {resp.status} {url[-80:]}")
+                        # Capture challenge token issued by CF (needed for GAK POST)
+                        if 'captcha/challenge' in url and 'context=apikey' in url and resp.status == 200:
+                            try:
+                                body = resp.json()
+                                log_step(f"GAK captcha/challenge body: {str(body)[:400]}")
+                                _captcha_challenge.update(body.get('result', {}) or {})
+                            except Exception as _ce:
+                                log_step(f"captcha/challenge parse error: {_ce}")
+                        # Log full body for user/api_key
+                        if 'user/api_key' in url:
+                            try:
+                                body = resp.json()
+                                log_step(f"GAK api_key {resp.status} body: {str(body)[:400]}")
+                                if resp.status == 200:
+                                    result = body.get('result', {}) or {}
+                                    key = (result.get('api_key') or result.get('key') or
+                                           result.get('value') or result.get('global_key') or '')
+                                    if key and len(key) > 20:
+                                        log_step(f"GAK key from api_key 200: {key[:12]}...")
+                                        _intercepted_key.append(key)
+                            except Exception as _re:
+                                log_step(f"GAK api_key body error: {_re}")
+                            return
+                        if resp.status == 200 and ('api_key' in url or 'global_key' in url or
+                                'user/api' in url or 'verify' in url):
+                            try:
+                                body = resp.json()
+                                result = body.get('result', {}) or {}
+                                key = (result.get('api_key') or result.get('key') or
+                                       result.get('value') or result.get('global_key') or '')
+                                if not key:
+                                    for v in (result.values() if isinstance(result, dict) else []):
+                                        if isinstance(v, str) and len(v) > 30:
+                                            key = v; break
+                                if key and len(key) > 20:
+                                    log_step(f"GAK intercepted ({url[-40:]}): {key[:12]}...")
+                                    _intercepted_key.append(key)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                page.on("response", _on_gak_response)
 
                 # Click on "Global API Key" > "View" button
                 view_clicked = False
@@ -1276,32 +1534,66 @@ def main():
                                 page.screenshot(path="/tmp/cf_gak_before_ts.png")
                                 _ts_clicked = False
 
-                                # Use existing try_click_turnstile_checkbox() — it uses frame_element().bounding_box()
-                                log_step("GAK TS: calling try_click_turnstile_checkbox...")
-                                _ts_clicked = try_click_turnstile_checkbox(page)
-                                log_step(f"GAK TS click result: {_ts_clicked}")
-                                if _ts_clicked:
-                                    time.sleep(10)  # wait for Camoufox to auto-solve
-
-                                # Fallback: direct frame_element bounding box
-                                if not _ts_clicked:
-                                    try:
-                                        _ts_f = next((f for f in page.frames if 'challenges.cloudflare.com' in (f.url or '')), None)
-                                        if _ts_f:
-                                            _handle = _ts_f.frame_element()
-                                            _bb = _handle.bounding_box() if _handle else None
-                                            log_step(f"GAK TS frame_element bbox: {_bb}")
-                                            if _bb:
-                                                _tx = _bb["x"] + 28
-                                                _ty = _bb["y"] + 32
-                                                page.mouse.move(_tx, _ty, steps=10)
-                                                time.sleep(0.3)
-                                                page.mouse.click(_tx, _ty)
-                                                time.sleep(10)
-                                                log_step(f"GAK TS bbox click: ({_tx:.0f},{_ty:.0f})")
+                                # Solve Turnstile in GAK modal
+                                # Strategy: try auto-click first (works in non-headless Camoufox),
+                                # then ALWAYS try 2Captcha inject as insurance (token injected
+                                # before View is clicked, so CF accepts it either way).
+                                _gak_ts_frame = next((f for f in page.frames if 'challenges.cloudflare.com' in (f.url or '')), None)
+                                if _gak_ts_frame:
+                                    log_step("GAK TS: Turnstile frame found")
+                                    # Step 1: auto-click (non-headless Camoufox auto-solves)
+                                    _ts_clicked = try_click_turnstile_checkbox(page)
+                                    log_step(f"GAK TS auto-click result: {_ts_clicked}")
+                                    time.sleep(5)  # wait for potential auto-solve
+                                    # Step 2: always inject 2Captcha token as well (headless fallback)
+                                    if args.captcha_key:
+                                        log_step("GAK TS: injecting 2Captcha token...")
+                                        try:
+                                            _gak_sitekey = get_turnstile_sitekey(page)
+                                            _gak_action = get_turnstile_action(page, default="managed")
+                                            log_step(f"GAK TS action: {_gak_action}")
+                                            _gak_ts_tok = solve_turnstile_2captcha(
+                                                args.captcha_key,
+                                                "https://dash.cloudflare.com/profile/api-tokens",
+                                                _gak_sitekey,
+                                                timeout=120,
+                                                action=_gak_action,
+                                            )
+                                            if _gak_ts_tok:
+                                                page.evaluate(f"""
+                                                    () => {{
+                                                        const tok = '{_gak_ts_tok}';
+                                                        // Use React native setter trick — plain assignment bypasses React controlled inputs
+                                                        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                                        for (const name of ['cf-turnstile-response', 'cf_challenge_response']) {{
+                                                            document.getElementsByName(name).forEach(el => {{
+                                                                nativeSetter.call(el, tok);
+                                                                el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                                                                el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                                            }});
+                                                        }}
+                                                        // Also call Turnstile success callback if registered on widget
+                                                        try {{
+                                                            const widget = document.querySelector('[data-callback]');
+                                                            const cbName = widget && widget.getAttribute('data-callback');
+                                                            if (cbName && window[cbName]) window[cbName](tok);
+                                                        }} catch(e) {{}}
+                                                        // Try direct turnstile API
+                                                        try {{
+                                                            if (window.__cf_chl_opt && window.__cf_chl_opt.cFRq) {{
+                                                                window.__cf_chl_opt.cFRq(tok);
+                                                            }}
+                                                        }} catch(e) {{}}
+                                                    }}
+                                                """)
+                                                time.sleep(3)
+                                                log_step(f"GAK TS: 2Captcha token injected ({_gak_ts_tok[:12]}...)")
                                                 _ts_clicked = True
-                                    except Exception as _me:
-                                        log_step(f"GAK TS bbox err: {_me}")
+                                        except Exception as _2ce:
+                                            log_step(f"GAK TS 2Captcha error: {_2ce}")
+                                else:
+                                    log_step("GAK TS: no Turnstile frame in modal (skip)")
+                                    _ts_clicked = True  # no Turnstile needed
 
                                 page.screenshot(path="/tmp/cf_gak_before_submit.png")
 
@@ -1349,6 +1641,16 @@ def main():
                                 if _clicked_view:
                                     time.sleep(5)
                                     page.screenshot(path="/tmp/cf_gak_after_submit.png")
+                                    # Log modal state after submit — detect error or success
+                                    try:
+                                        _modal_txt = page.locator("[role='dialog']").inner_text(timeout=3000)
+                                        log_step(f"Modal after View click: {_modal_txt[:300]}")
+                                        # Check if error shown (invalid code, expired, etc.)
+                                        _modal_lower = _modal_txt.lower()
+                                        if any(w in _modal_lower for w in ["invalid", "incorrect", "expired", "error", "failed", "wrong"]):
+                                            log_step("GAK modal shows error — OTP rejected by CF")
+                                    except Exception:
+                                        log_step("Modal closed after View click (good sign)")
                             else:
                                 log_step("OTP input not found via any selector")
 
@@ -1381,7 +1683,41 @@ def main():
                 _key_regex = r'\b([a-f0-9]{36,45})\b'
 
                 for _gk_poll in range(30):
+                    if _gk_poll == 0:
+                        # First poll — dump full page content to diagnose where key appears
+                        try:
+                            _body_dump = page.inner_text("body")
+                            log_step(f"GAK body after modal close (first 500): {_body_dump[:500]}")
+                            # Also dump all visible text values
+                            _all_dom = page.evaluate("""
+                                () => {
+                                    const vals = [];
+                                    document.querySelectorAll('*').forEach(el => {
+                                        if (el.children.length === 0) {
+                                            const t = (el.textContent || el.value || '').trim();
+                                            if (t.length >= 30 && t.length <= 60 && /^[a-f0-9]+$/.test(t)) {
+                                                vals.push(el.tagName + ': ' + t);
+                                            }
+                                        }
+                                    });
+                                    return vals.join(' | ');
+                                }
+                            """)
+                            log_step(f"GAK hex strings in DOM: {_all_dom or 'none'}")
+                            page.screenshot(path="/tmp/cf_gak_poll0.png")
+                        except Exception as _dump_e:
+                            log_step(f"GAK body dump error: {_dump_e}")
+                        # Also log all CF API responses captured so far
+                        if _intercepted_key:
+                            log_step(f"GAK intercepted key at poll 0: {_intercepted_key[0][:12]}...")
+                            global_key = _intercepted_key[0]
+                            break
                     page.screenshot(path="/tmp/cf_globalkey_page.png")
+                    # Check intercepted key each poll
+                    if _intercepted_key:
+                        global_key = _intercepted_key[0]
+                        log_step(f"GAK from network intercept (poll {_gk_poll}): {global_key[:12]}...")
+                        break
                     try:
                         # 1. Check ALL input + TEXTAREA values via evaluate
                         _all_vals = page.evaluate("""
@@ -1455,11 +1791,22 @@ def main():
                 r = _req.get(f"{base_api}/user/tokens/permission_groups", headers=headers, timeout=15)
                 pg_data = r.json()
                 workers_ai_id = None
-                for pg in pg_data.get('result', []):
-                    if 'Workers AI' in pg.get('name', ''):
+                _wa_groups = pg_data.get('result', [])
+                # Prefer exact "Workers AI Read" over "Workers AI Metadata Read"
+                for pg in _wa_groups:
+                    nm = pg.get('name', '')
+                    if nm in ('Workers AI Read', 'Workers AI Write'):
                         workers_ai_id = pg['id']
-                        log_step(f"Workers AI permission group id: {workers_ai_id}")
+                        log_step(f"Workers AI permission group id (exact): {nm} = {workers_ai_id}")
                         break
+                if not workers_ai_id:
+                    # fallback: any Workers AI group that is not Metadata
+                    for pg in _wa_groups:
+                        nm = pg.get('name', '')
+                        if 'Workers AI' in nm and 'Metadata' not in nm:
+                            workers_ai_id = pg['id']
+                            log_step(f"Workers AI permission group id (fallback): {nm} = {workers_ai_id}")
+                            break
 
                 if not workers_ai_id:
                     log_step(f"Workers AI group not found. Available: {[p['name'] for p in pg_data.get('result', [])[:10]]}")
@@ -1529,9 +1876,14 @@ def main():
                     return None
                 pg_data = pg_resp.json()
                 groups = pg_data.get("result") or []
+                # Prefer exact "Workers AI Read" — avoid "Workers AI Metadata Read"
                 workers_ai_id = next(
-                    (g["id"] for g in groups if "Workers AI" in g.get("name", "")), None
+                    (g["id"] for g in groups if g.get("name") in ("Workers AI Read", "Workers AI Write")), None
                 )
+                if not workers_ai_id:
+                    workers_ai_id = next(
+                        (g["id"] for g in groups if "Workers AI" in g.get("name", "") and "Metadata" not in g.get("name", "")), None
+                    )
                 if not workers_ai_id:
                     log_step(f"Workers AI group not found. Available: {[g['name'] for g in groups[:10]]}")
                     return None

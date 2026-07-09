@@ -4,6 +4,35 @@ All notable changes to the decoupled **9Router v2** platform will be documented 
 
 ---
 
+## [v0.6.3] - 2026-07-08
+
+### Fixed
+- **Claude Code double `/v1` in URL**: CLI Tools claude-settings route was incorrectly appending `/v1` to `ANTHROPIC_BASE_URL`. Since Claude Code's SDK already appends `/v1/messages` automatically, requests were hitting `/v1/v1/messages` (404). The route now strips any trailing `/v1` from the URL instead of adding it.
+- **Claude Code `model output must contain either output text or tool calls` error**: When models (e.g. GLM, DeepSeek) return only a thinking block with empty text, the openai-to-claude translator now injects a minimal text block to satisfy Claude Code's requirement.
+- **AMRouter port detection in CLI Tools**: Claude-settings route now detects AMRouter on its default port `5177` (in addition to legacy 9Router port `3001`).
+- **Duplicate entries in Recent Requests/Usage**: Streaming requests were being logged twice — once as a placeholder (`ttft=0, "[Streaming in progress...]"`) when the stream started, and again when it completed. The placeholder write has been removed; only the final completion record is now saved, resulting in one clean entry per request.
+- **Cloudflare 400 error with tool_result in multi-turn tool use**: The Claude→OpenAI request translator was not handling `thinking` and `redacted_thinking` blocks in assistant messages. When Claude Code sent a multi-turn conversation with thinking blocks, these unhandled blocks caused the translator to produce an empty/null message — de-syncing the message array index and leaving `tool_result` blocks unconverted in user messages. Fixed by: (1) converting `thinking` blocks to text parts, (2) silently dropping `redacted_thinking` blocks, (3) adding a `default` case to preserve message ordering, and (4) always returning a non-null message from array content.
+
+
+
+---
+
+## [v0.6.2] - 2026-07-08
+
+
+### Changed
+- **Rebranding — AMRouter**: Sidebar, login page, favicon, and browser tab title updated from "9Router v2" to "AMRouter" to match the renamed GitHub repository.
+- **New Logo**: App icon updated with a new AMRouter logo (orange circuit-board "AM" motif on dark background).
+
+---
+
+## [v0.6.1] - 2026-07-08
+
+### Fixed
+- **Icons not rendering (showing as text)**: Material Symbols Outlined font is now bundled locally via the `material-symbols` npm package instead of being loaded from Google Fonts CDN. Fixes icons appearing as raw text strings (e.g. `content_copy`, `vpn_key`, `bolt`) in environments without internet access or with blocked CDN requests.
+
+---
+
 ## [v0.6.0] - 2026-07-06
 
 ### Added
@@ -25,7 +54,7 @@ All notable changes to the decoupled **9Router v2** platform will be documented 
   - **Cline**: `api.cline.bot/api/v1/auth/me` plan + credits
 
 - **Skills Page Improvements**:
-  - Skills now point to `ahwanulm/9router-v2` repo (previously `decolua/9router`)
+  - Skills now point to `ahwanulm/AMRouter` repo (previously `decolua/9router`)
   - Added `using-superpowers` and `multi-brain` agent skills
   - Page redesigned with 3 sections: Entry Point / API Capabilities / Agent Workflow
   - Quick Start card with copy-prompt button

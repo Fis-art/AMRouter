@@ -29,7 +29,7 @@
 ## Architecture
 
 ```
-9router-v2/
+AMRouter/
 ├── backend/          # Express server (port 3001)
 │   └── src/
 │       ├── routes/   # Auto-routed endpoints (/v1, /api, /auth, ...)
@@ -55,8 +55,8 @@
 ### Install
 
 ```bash
-git clone https://github.com/ahwanulm/9router-v2.git
-cd 9router-v2
+git clone https://github.com/ahwanulm/AMRouter.git
+cd AMRouter
 npm install
 ```
 
@@ -124,7 +124,7 @@ Skills are SKILL.md files for AI coding agents. Paste the entry skill URL into y
 
 ```
 Read this skill and use it:
-https://raw.githubusercontent.com/ahwanulm/9router-v2/refs/heads/master/skills/9router/SKILL.md
+https://raw.githubusercontent.com/ahwanulm/AMRouter/refs/heads/master/skills/9router/SKILL.md
 ```
 
 Browse all skills in the Dashboard → Skills page or in the [`skills/`](./skills/) directory.
